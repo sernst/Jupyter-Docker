@@ -1,0 +1,435 @@
+#!/usr/bin/env python
+
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+
+import io
+import time
+import tempfile
+from argparse import ArgumentParser
+from argparse import RawTextHelpFormatter
+from collections import namedtuple
+
+import os
+import sys
+import subprocess
+
+IMAGE = 'jupyter/all-spark-notebook'
+NAME = 'jupyter'
+
+Response = namedtuple('Response', ['out', 'err', 'code', 'trace'])
+
+
+def to_string(source):
+    """
+    Converts bytes (str2) values to str (unicode)
+
+    :param source:
+        The source string to be converted if it is not already unicide str
+    :return:
+        The converted string
+    """
+
+    if sys.version_info < (3,):
+        import codecs
+        return codecs.unicode_escape_decode(source)[0]
+    else:
+        if isinstance(source, bytes):
+            return source.decode('utf-8', 'ignore')
+        else:
+            return source
+
+
+def trace_message(kind, message, *args):
+    """
+    Prints a formatted message to the console
+
+    :param kind:
+        The message type header
+    :param message:
+        The message to be displayed
+    :return:
+    """
+
+    body = ('\n{}'.format('\n'.join(args)) if args else '')
+    print('[{}]: {}{}'.format(kind, message, body))
+
+
+def execute(cmd, live=False, shell=False):
+    """
+    Executes a system command with monitored standard out and standard error.
+    Commands are specified as list as the subprocess module expects.
+
+    :param cmd:
+        The command list to execute
+    :param live:
+        If true, the stdout and stderr will be streamed to the console while
+        the command is executing
+    :param shell:
+        Whether or not to run the command in shell mode. See subprocess module
+        for details.
+    :return:
+        A response object containing information on yje results of the run
+        command
+    """
+
+    stdout_fd, stdout_path = tempfile.mkstemp()
+    stderr_fd, stderr_path = tempfile.mkstemp()
+    out = []
+    err = []
+
+    with io.open(stdout_path, 'wb') as stdout_writer, \
+            io.open(stdout_path, 'rb', 1) as stdout_reader, \
+            io.open(stderr_path, 'wb', 1) as stderr_writer, \
+            io.open(stderr_path, 'rb', 1) as stderr_reader:
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=stdout_writer,
+            stderr=stderr_writer,
+            shell=shell
+        )
+
+        def write_data():
+            chunk = stdout_reader.read()
+            if chunk:
+                out.append(to_string(chunk))
+                if live:
+                    sys.stdout.write(chunk)
+
+            chunk = stderr_reader.read()
+            if chunk:
+                err.append(to_string(chunk))
+                if live:
+                    sys.stderr.write(chunk)
+
+        while process.poll() is None:
+            write_data()
+            time.sleep(0.25)
+
+        write_data()
+
+    process.communicate()
+    out = to_string(''.join(out).strip() if out else '')
+    err = to_string(''.join(err).strip() if err else '')
+
+    try:
+        os.remove(stdout_path)
+        os.remove(stderr_path)
+    except Exception:
+        pass
+
+    def add_to_message(label, value):
+        if not value:
+            return []
+
+        if value.find('\n') != -1:
+            return ['--- {} ---'.format(label), value]
+
+        return ['  * {}: {}'.format(label, value)]
+
+    def do_trace():
+        message = ['  * CODE: {}'.format(process.returncode)]
+        message += add_to_message('OUT', out)
+        message += add_to_message('ERROR', err)
+        trace_message('EXECUTED', ' '.join(cmd), *message)
+
+    return Response(
+        out=out,
+        err=err,
+        code=process.returncode,
+        trace=do_trace
+    )
+
+
+def exists():
+    """
+    Determines whether or not the docker image needed to run the jupyter
+    container exists. Also checks that docker is installed and the docker
+    daemon is running.
+
+    :return:
+        Whether or not the jupyter docker image exists on the local system
+    """
+
+    res = execute(['docker', '--version'])
+    if res.code:
+        trace_message(
+            'ERROR',
+            'Docker does not appear to be installed',
+            'If you believe that you have installed it, you should check to'
+            'make sure that your system path has been updated to include it.'
+            'This may require that you restart your computer for the changes'
+            'to take effect.'
+        )
+        res.trace()
+        sys.exit(100)
+
+    res = execute(['docker', 'ps'])
+    if res.code:
+        trace_message(
+            'ERROR',
+            'Docker does not appear to be currently running on your machine.',
+            'Please run the Docker app that you installed to start it. If the',
+            'app is running, the Docker kernel may have crashed and need to be',
+            'restarted'
+        )
+        res.trace()
+        sys.exit(101)
+
+    res = execute(['docker', 'images', '{}:latest'.format(IMAGE)])
+    if res.code:
+        trace_message('ERROR', 'Failed docker command execution')
+        res.trace()
+        sys.exit(102)
+
+    return bool(res.out.find(IMAGE) != -1)
+
+
+def connect():
+    """
+    Opens a bash terminal connection to the running jupyter container
+
+    :return:
+    """
+
+    res = execute(['docker', 'ps'])
+    if res.out.find('jupyter') == -1:
+        trace_message(
+            'ERROR',
+            'Container must be started before it can be opened'
+        )
+        sys.exit(107)
+
+    fd, path = tempfile.mkstemp()
+    with open(path, 'w+') as f:
+        f.write('\n'.join([
+            '#!/usr/bin/env bash',
+            'docker exec -it jupyter /bin/bash'
+        ]))
+    os.system('chmod 775 {}'.format(path))
+
+    trace_message(
+        'OPENED',
+        'Bash terminal into container',
+        '',
+        '  [1]  Use the "exit" command to close the container',
+        '       terminal connection',
+        '',
+        '  [2]  PySpark is located at:',
+        '       /usr/local/spark-1.6.1-bin-hadoop2.6/bin/pyspark',
+        ''
+    )
+    subprocess.call(path)
+
+    try:
+        os.remove(path)
+    except Exception:
+        pass
+
+    trace_message(
+        'COMPLETE',
+        'Connection to running container has been closed'
+    )
+
+
+def start(directory, port, port_python_2):
+    """
+    Starts up a new jupyter container. If one is already running, that
+    container is stopped and deleted before the new container is started.
+
+    :param directory:
+        The host system directory that will be mounted to the container so
+        that host files will be available to notebooks running in the
+        container.
+    :param port:
+        The localhost port for the jupyter notebook server running from an
+        Anaconda 3 python environment
+    :param port_python_2:
+        The localhost port for the jupyter notebook server running from an
+        Anaconda 2 python environment
+    :return:
+    """
+
+    if not directory:
+        directory = os.path.expanduser('~')
+
+    stop()
+    res = execute([
+        'docker', 'run', '-d',
+        '-p', '8888:{}'.format(port),
+        '-p', '8889:{}'.format(port_python_2),
+        '-v', '{}:/home/jovyan/work/root'.format(directory),
+        '--name={}'.format(NAME),
+        IMAGE
+    ])
+    if res.code:
+        trace_message('ERROR', 'Failed to run docker container')
+        res.trace()
+        sys.exit(105)
+
+    os.system(' '.join([
+        'docker exec -d jupyter',
+        'bash -c "source activate python2; jupyter-notebook &"'
+    ]))
+
+    trace_message(
+        'STARTED',
+        'Jupyter container is running',
+        '  * For Python 3 notebook environments use:',
+        '      http://localhost:{}'.format(port),
+        '',
+        '  * For Python 2 notebook environments use:',
+        '      http://localhost:{}'.format(port_python_2)
+    )
+
+
+def stop():
+    """
+    Stops the running jupyter container and deletes it, if such a container is
+    found to exist.
+
+    :return:
+        Whether or not the jupyter container was stopped/removed
+    """
+
+    res = execute(['docker', 'ps', '-a'])
+    if res.out.find('jupyter') != -1:
+        execute(['docker', 'stop', 'jupyter'])
+        execute(['docker', 'rm', 'jupyter'])
+        return True
+
+    return False
+
+
+def run(parser, command, port, port_python_2, directory=None):
+    """
+    Runs the specified command action issued by the user with the given
+    arguments
+
+    :param parser:
+        The argument parser that was used to read the commands specified by
+        the user
+    :param command:
+        The action to be carried out
+    :param port:
+        The localhost port for binding Jupyter notebooks run from an Anaconda
+        python 3 environment
+    :param port_python_2:
+        The localhost port for binding Jupyter notebooks run from an Anaconda
+        python 2 environment
+    :param directory:
+        The host directory on the user's system that will be made available to
+        the container and jupyter notebooks
+    :return:
+    """
+
+    if command == 'help':
+        print('\n')
+        parser.print_help()
+        print('')
+        sys.exit(0)
+
+    if command == 'stop':
+        result = stop()
+        if result:
+            trace_message('SUCCESS', 'Running container has been stopped')
+        else:
+            trace_message('ABORTED', 'No running container was found')
+        sys.exit(0)
+
+    if not exists() or command == 'update':
+        stop()
+        code = subprocess.call(['docker', 'pull', '{}'.format(IMAGE)])
+        if code:
+            trace_message('ERROR', 'Failed to pull image')
+            sys.exit(103)
+
+    if command == 'update':
+        sys.exit(0)
+
+    if command == 'open':
+        connect()
+        sys.exit(0)
+
+    if command != 'start':
+        trace_message('ERROR', 'Unrecognized command "{}"'.format(command))
+        sys.exit(104)
+
+    start(directory, port, port_python_2)
+
+
+def parse():
+    """
+    Uses argparse to read the command line arguments and convert them to a
+    dictionary for use by the run command
+
+    :return:
+        A dictionary containing the command arguments specified by the user or
+        defaulted if omitted
+    """
+
+    parser = ArgumentParser(
+        description='\n'.join([
+            'Command line utility for managing a Jupyter data science',
+            'notebook (with Spark) docker container. Command options include',
+            '  * start: starts a running container with any specified',
+            '        arguments. Any existing container will be shut down',
+            '        and replaced by a new one.',
+            '',
+            '  * stop: stops the currently running container if one exists',
+            '',
+            '  * update: installs or updates the docker image on which the',
+            '         container is run. This step will run implicitly if a',
+            '         start command is issued before the image has been',
+            '         installed.',
+            '',
+            '  * open: opens a bash terminal in the currently running',
+            '         container. This gives you command line access for',
+            '         running python or pyspark scripts outside of a notebook',
+            '         environment'
+        ]),
+        formatter_class=RawTextHelpFormatter
+    )
+
+    parser.add_argument(
+        'command',
+        nargs='?',
+        default='help',
+        help='The command to execute, e.g. start, open, update or stop.'
+    )
+
+    parser.add_argument(
+        '-p', '--port',
+        dest='port',
+        default=8888,
+        type=int,
+        help='The local connection port for Jupyter notebooks'
+    )
+
+    parser.add_argument(
+        '-p2', '--port2',
+        dest='port_python_2',
+        default=8889,
+        type=int,
+        help='The local connection port for python 2 environment notebooks'
+    )
+
+    parser.add_argument(
+        '-d', '--directory',
+        dest='directory',
+        default=None,
+        help='The root directory made available in to Jupyter notebooks'
+    )
+
+    kwargs = vars(parser.parse_args())
+    kwargs['command'] = kwargs.get('command', '').lower()
+    kwargs['parser'] = parser
+    return kwargs
+
+
+if __name__ == '__main__':
+    run(**parse())
+
