@@ -277,6 +277,16 @@ def start(directory, port, port_python_2):
 
     os.system(' '.join([
         'docker exec -d jupyter',
+        'bash -c "/opt/conda/bin/pip install mrjob"'
+    ]))
+
+    os.system(' '.join([
+        'docker exec -d jupyter',
+        'bash -c "/opt/conda/envs/python2/bin/pip install mrjob"'
+    ]))
+
+    os.system(' '.join([
+        'docker exec -d jupyter',
         'bash -c "source activate python2; jupyter-notebook &"'
     ]))
 
