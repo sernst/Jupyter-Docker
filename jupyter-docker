@@ -5,6 +5,7 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
+import platform
 import io
 import time
 import tempfile
@@ -254,7 +255,11 @@ def start(directory, port, port_python_2):
     """
 
     if not directory:
-        directory = os.path.expanduser('~')
+        if platform.system().lower().startswith('win'):
+            username = os.environ.get('USERNAME')
+            directory = '/c/Users/{}'.format(username) if username else '/c'
+        else:
+            directory = os.path.expanduser('~')
 
     stop()
     res = execute([
@@ -284,6 +289,21 @@ def start(directory, port, port_python_2):
         '  * For Python 2 notebook environments use:',
         '      http://localhost:{}'.format(port_python_2)
     )
+
+    if platform.system().lower().startswith('win'):
+        res = execute(['docker-machine', 'ip'])
+        if not res.code:
+            ip = res.out.strip()
+            print('')
+            trace_message(
+                'INF0',
+                'On Windows the localhost may not be available. If not, try:',
+                '  * For Python 3 notebook environments use:',
+                '      http://{}:{}'.format(ip, port),
+                '',
+                '  * For Python 2 notebook environments use:',
+                '      http://{}:{}'.format(ip, port_python_2)
+            )
 
 
 def stop():
@@ -432,4 +452,5 @@ def parse():
 
 if __name__ == '__main__':
     run(**parse())
+
 
