@@ -287,7 +287,8 @@ def start(directory, port, port_python_2):
 
     os.system(' '.join([
         'docker exec -d jupyter',
-        'bash -c "source activate python2; jupyter-notebook &"'
+        'bash -c "source activate python2;',
+        'jupyter-notebook --port={} &"'.format(port_python_2)
     ]))
 
     trace_message(
