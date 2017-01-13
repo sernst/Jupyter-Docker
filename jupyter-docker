@@ -268,7 +268,9 @@ def start(directory, port, port_python_2):
         '-p', '8889:{}'.format(port_python_2),
         '-v', '{}:/home/jovyan/work/root'.format(directory),
         '--name={}'.format(NAME),
-        IMAGE
+        IMAGE,
+        'start-notebook.sh',
+        '--NotebookApp.token=\'\''
     ])
     if res.code:
         trace_message('ERROR', 'Failed to run docker container')
